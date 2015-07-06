@@ -52,6 +52,13 @@ def setupModel(model_):
 	net = caffe.Classifier('tmp.prototxt', param_fn, mean = np.float32([104.0, 116.0, 122.0]), channel_swap = (2,1,0))
 	return net
 
+def blur(img, sigma):
+    if sigma > 0:
+        img[0] = nd.filters.gaussian_filter(img[0], sigma, order=0)
+        img[1] = nd.filters.gaussian_filter(img[1], sigma, order=0)
+        img[2] = nd.filters.gaussian_filter(img[2], sigma, order=0)
+    return img
+
 def make_step(net, step_size=1.5, end='inception_4c/output', jitter=32, clip=True):
 	'''Basic gradient ascent step.'''
 	src = net.blobs['data'] # input image is stored in Net's 'data' blob	
@@ -86,12 +93,43 @@ def deepdream(net, base_img, iter_n=10, octave_n=4, octave_scale=1.4, end='incep
 		src.reshape(1,3,h,w) # resize the network's input image size
 		src.data[0] = octave_base+detail
 		for i in xrange(iter_n):
+			#print "make step "+str(i)+"/"+str(iter_n)
 			make_step(net, end=end, clip=clip, jitter=jitter, **step_params)
 		# extract details produced on the current octave
 		detail = src.data[0]-octave_base
 	#returning the resulting image
 	return deprocess(net, src.data[0])
 
+# idea + code to interpolate blur/jitter/step_size between frames taken from:
+# https://github.com/kylemcdonald/deepdream/blob/master/dream.ipynb
+def deepdream_stepped(net, base_img, iter_n=10, octave_n=4, octave_scale=1.4, end='inception_3b/5x5_reduce', start_sigma=2.5, end_sigma=.1, start_jitter=48., end_jitter=4., start_step_size=3.0, end_step_size=1.5, clip=True, **step_params):
+	# prepare base images for all octaves
+	octaves = [preprocess(net, base_img)]
+	for i in xrange(octave_n-1):
+		octaves.append(nd.zoom(octaves[-1], (1, 1.0/octave_scale,1.0/octave_scale), order=1))
+	src = net.blobs['data']
+	detail = np.zeros_like(octaves[-1]) # allocate image for network-produced details
+	for octave, octave_base in enumerate(octaves[::-1]):
+		h, w = octave_base.shape[-2:]
+		if octave > 0:	# upscale details from the previous octave
+			h1, w1 = detail.shape[-2:]
+			detail = nd.zoom(detail, (1, 1.0*h/h1,1.0*w/w1), order=1)
+		src.reshape(1,3,h,w) # resize the network's input image size
+		src.data[0] = octave_base+detail
+
+		for i in xrange(iter_n):	
+			sigma = start_sigma + ((end_sigma - start_sigma) * i) / iter_n
+			jitter = start_jitter + ((end_jitter - start_jitter) * i) / iter_n
+			step_size = start_step_size + ((end_step_size - start_step_size) * i) / iter_n
+            
+			make_step(net, end=end, clip=clip, jitter=jitter, step_size=step_size, **step_params)
+			#src.data[0] = blur(src.data[0], sigma)
+		
+		# extract details produced on the current octave
+		detail = src.data[0]-octave_base
+	#returning the resulting image
+	return deprocess(net, src.data[0])
+	
 def loadImage(pathToImage):
 	img = np.float32(PIL.Image.open(pathToImage))
 	return img
@@ -103,4 +141,13 @@ def makeDeepDream(img, classifier, end, name, iterations, octaves, octave_scale,
 	h, w = frame.shape[:2]
 	frame = nd.affine_transform(frame, [1-scaleZoom,1-scaleZoom,1], [h*scaleZoom/2,w*scaleZoom/2,0], order=1)
 	return frame
+		
+def makeDeepDreamStepped(img, classifier, end, name, iterations, octaves, octave_scale, start_sigma, end_sigma, start_jitter, end_jitter, start_step_size, end_step_size, scaleZoom):
+	newImagePath = pathToOutput+'/'+name+"_i"+str(iterations)+"_o"+str(octaves)+"_os"+str(octave_scale)+"_j"+str(start_jitter)+'_'+str(end_jitter)+'.png'
+	frame = deepdream_stepped(classifier, img, iterations, octaves, octave_scale, end, start_sigma, end_sigma, start_jitter, end_jitter, start_step_size, end_step_size)
+	PIL.Image.fromarray(np.uint8(np.clip(frame, 0, 255))).save(newImagePath, 'png')
+	h, w = frame.shape[:2]
+	frame = nd.affine_transform(frame, [1-scaleZoom,1-scaleZoom,1], [h*scaleZoom/2,w*scaleZoom/2,0], order=1)
+	return frame
+		
 		
